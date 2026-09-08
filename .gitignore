@@ -1,0 +1,39 @@
+# --- Secrets / environment ---
+.env
+.env.local
+.env*.local
+# Keep the .example templates; they carry placeholders only.
+
+# --- Dependencies ---
+node_modules/
+backend/venv/
+
+# --- Databases (local dev data) ---
+*.db
+*.db-journal
+*.sqlite
+
+# --- Build output ---
+.next/
+out/
+build/
+tsconfig.tsbuildinfo
+
+# --- Python ---
+__pycache__/
+*.pyc
+
+# --- Logs & scratch output from local runs / e2e suites ---
+*.log
+e2e/*-report.json
+e2e/*-console.log
+e2e/node_modules/
+test-results/
+playwright-report/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+
+# --- Local assistant workspace state (not part of the product) ---
+.claude/

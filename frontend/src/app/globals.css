@@ -1,0 +1,51 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply antialiased;
+    background: #eef1f5;
+  }
+
+  button, input, select {
+    font: inherit;
+  }
+
+  ::selection {
+    background: #cfe0ff;
+    color: #16336f;
+  }
+
+  /* The room route renders full-bleed outside the app shell; keep the page
+     ground dark behind it so no light gap shows during resize/overscroll. */
+  body:has(.meeting-room) {
+    background: #0d1117;
+  }
+}
+
+/* Realtime reaction pills: rise, hold, fade — then unmount. */
+@keyframes reaction-float {
+  0% { opacity: 0; transform: translateY(14px) scale(0.7); }
+  15% { opacity: 1; transform: translateY(0) scale(1); }
+  70% { opacity: 1; transform: translateY(-10px) scale(1); }
+  100% { opacity: 0; transform: translateY(-44px) scale(0.95); }
+}
+
+.reaction-toast {
+  animation: reaction-float 3s ease-out forwards;
+}
+
+@layer components {
+  .field {
+    @apply w-full rounded-xl border border-slate-200 bg-white px-3.5 py-3 text-sm text-slate-900 outline-none transition-colors placeholder:text-slate-400 focus:border-[#2f6fed] focus:ring-4 focus:ring-blue-100;
+  }
+
+  .primary-button {
+    @apply rounded-xl bg-[#2f6fed] px-4 py-3 text-sm font-semibold text-white transition-colors hover:bg-[#245dcc] focus:outline-none focus:ring-4 focus:ring-blue-100;
+  }
+
+  .secondary-button {
+    @apply rounded-xl bg-slate-100 px-4 py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-200 focus:outline-none focus:ring-4 focus:ring-slate-100;
+  }
+}

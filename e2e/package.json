@@ -1,0 +1,11 @@
+{
+  "name": "zoom-clone-e2e-verification",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Runtime WebRTC verification harness. Not part of the application.",
+  "dependencies": {
+    "playwright": "^1.63.0",
+    "ws": "^8.21.3"
+  }
+}
