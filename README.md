@@ -56,15 +56,25 @@ The backend does **not** route media. Audio, video, and screen sharing are handl
 - `CORS_ORIGINS`: Comma-separated list of allowed origins. **Must include the deployed frontend URL** (e.g. `https://your-frontend.vercel.app`).
 - `DATABASE_PATH`: (Optional) Custom absolute path to store the SQLite database. Important for persistent volumes.
 
+## Health Checks
+
+Two endpoints, neither requiring auth or meeting membership:
+- `GET /health` — deployment liveness probe. Returns `{"status": "ok", "database": "ok"}` (HTTP 200), or HTTP 503 if SQLite is unreachable.
+- `GET /api/health` — same check under the API prefix: `{"status": "ok", "message": "API is up and running"}`.
+
 ## SQLite Persistence
 
-**CRITICAL DEPLOYMENT NOTE:** Many PaaS providers (like Render free tier or Heroku) use **ephemeral filesystems**. If the backend service restarts, the `zoom.db` SQLite file will be destroyed.
+**CRITICAL DEPLOYMENT NOTE:** Many PaaS providers use **ephemeral filesystems** — if the backend service restarts, the `zoom.db` SQLite file is destroyed.
 
-To ensure true persistence:
-- **Render**: Attach a "Disk" to your Web Service, and configure the `DATABASE_PATH` env var to point to a path on that disk (e.g., `/data/zoom.db`).
-- **Railway**: Attach a "Volume" to your service and set `DATABASE_PATH` to point within the volume (e.g., `/volume/zoom.db`).
+**This deployment (Render free tier): SQLite data is ephemeral.** The free tier provides no persistent disk, so the database resets on every deploy, restart, and 15-minute idle spin-down. Meetings and chat history survive only while the service stays up. The application is architected for this: schema creation is automatic and idempotent on startup (`create_all`, no destructive resets), and no seed data is required — every user, meeting, and participant is created lazily at runtime, so a fresh database is immediately fully functional.
 
-If persistent storage is not available on your tier, the data will reset on every deployment or idle restart.
+To make SQLite truly persistent instead, attach storage and point `DATABASE_PATH` at it:
+- **Render (paid Starter+)**: attach a "Disk" (e.g. mounted at `/data`) and set `DATABASE_PATH=/data/zoom.db`. Disk contents survive deploys and restarts. Note: adding a disk disables zero-downtime deploys.
+- **Railway**: attach a "Volume" and set `DATABASE_PATH` to a path within it (e.g. `/volume/zoom.db`).
+
+The assignment requires SQLite, so the database engine is not substituted — the persistence strategy is a documented hosting decision.
+
+**Free tier behavior worth knowing:** the service spins down after 15 minutes without traffic (including WebSocket messages — an active meeting keeps it alive). The next request takes ~50–60 seconds to cold-start. The `/health` endpoint can be pinged to wake it before a demo.
 
 ## WebSocket Configuration
 
