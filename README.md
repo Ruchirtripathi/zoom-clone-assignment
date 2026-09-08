@@ -53,7 +53,7 @@ The backend does **not** route media. Audio, video, and screen sharing are handl
 - `NEXT_PUBLIC_ICE_SERVERS`: (Optional) JSON string of custom STUN/TURN servers. Defaults to Google STUN if omitted.
 
 ### Backend (`backend/.env` for local, configure in Render/Railway for production)
-- `CORS_ORIGINS`: Comma-separated list of allowed origins. **Must include the deployed frontend URL** (e.g. `https://your-frontend.vercel.app`).
+- `CORS_ORIGINS`: Comma-separated list of allowed origins. **Must include the deployed frontend URL** — the live value is `http://localhost:3000,https://zoom-clone-frontend-beta.vercel.app` (no trailing slashes).
 - `DATABASE_PATH`: (Optional) Custom absolute path to store the SQLite database. Important for persistent volumes.
 
 ## Health Checks
@@ -106,9 +106,22 @@ uvicorn main:app --reload --port 8000
 
 ## Production URLs
 
-- **Frontend URL**: `https://<your-vercel-deployment-url>`
-- **Backend URL**: `https://<your-backend-deployment-url>`
-- **WebSocket**: `wss://<your-backend-deployment-url>`
+This repository is deployed and verified end-to-end:
+
+- **Frontend URL**: `https://zoom-clone-frontend-beta.vercel.app` (Vercel, HTTPS, auto-detected Next.js build from `frontend/`)
+- **Backend URL**: `https://zoom-clone-assignment-p30d.onrender.com` (Render free tier Web Service)
+- **WebSocket**: `wss://zoom-clone-assignment-p30d.onrender.com/api/ws/meetings/{meeting_id}?participant_id=...`
+- **Health probe**: `https://zoom-clone-assignment-p30d.onrender.com/health` → `{"status": "ok", "database": "ok"}`
+
+`CORS_ORIGINS` on the backend is set to `http://localhost:3000,https://zoom-clone-frontend-beta.vercel.app` (local development plus the deployed frontend). Invite links always point at the **frontend** domain (`https://zoom-clone-frontend-beta.vercel.app/room/{meeting_id}`) — never at the backend.
+
+A live production smoke suite ships with the repo: `e2e/live-verify.mjs` (36 checks: health, CORS, raw `wss://` join + presence, direct invite link, measured WebRTC media via getStats, chat, reactions, host controls, remove/end screens, DB status persistence, dynamic-route refresh, real 404s, static assets, 375px mobile, console audit).
+
+## Rollback / Redeploy
+
+- **Frontend (Vercel)**: every deployment keeps a unique URL. In the Vercel dashboard → `zoom-clone-frontend` → Deployments, open the last known-good deployment and use **Promote to Production** (or `vercel rollback` from the CLI). The current production alias is `zoom-clone-frontend-beta.vercel.app`.
+- **Backend (Render)**: Render keeps the previous deploy. Dashboard → `zoom-clone-assignment` → Events/Deploys → **Rollback** to the prior build. Note: on the free tier a rollback (like any restart) resets the ephemeral SQLite file.
+- **Config-only rollback**: if a bad environment variable is the problem, revert it in the provider dashboard (Vercel → Settings → Environment Variables; Render → Environment) and save — both platforms redeploy automatically.
 
 ## Troubleshooting
 

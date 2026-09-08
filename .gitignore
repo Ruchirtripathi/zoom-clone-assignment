@@ -37,3 +37,6 @@ Thumbs.db
 
 # --- Local assistant workspace state (not part of the product) ---
 .claude/
+
+.vercel
+.env*
