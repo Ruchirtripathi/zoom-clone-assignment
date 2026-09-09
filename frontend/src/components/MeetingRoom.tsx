@@ -1,16 +1,19 @@
 "use client";
 
 import {
-  Clipboard, Copy, Crown, Expand, Info, Keyboard,
-  MessageSquare, Mic, MicOff, Monitor, MoreHorizontal, PhoneOff, Send,
-  Share2, Sparkles, SmilePlus, Users, Video, VideoOff, X, Zap,
+  ArrowDownUp, Clipboard, Copy, Crown, Expand, EyeOff, Info, Keyboard,
+  LayoutGrid, MessageSquare, Mic, MicOff, Monitor, MoreHorizontal, PhoneOff, Send,
+  Share2, Sparkles, SmilePlus, Speaker, Users, Video, VideoOff, X, Zap, Columns2,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMeetingSocket } from "../hooks/useMeetingSocket";
 import { useLocalMedia } from "../hooks/useLocalMedia";
 import { useWebRTC } from "../hooks/useWebRTC";
-import LocalVideoTile from "./LocalVideoTile";
-import RemoteVideoTile from "./RemoteVideoTile";
+import {
+  GalleryLayout, MultiSpeakerLayout, PresentationLayout, SpeakerLayout,
+  ViewMenuRadio, ViewMenuToggle,
+} from "./VideoLayouts";
+import type { GallerySort, MeetingLayout, TileContext, TileParticipant } from "./VideoLayouts";
 import { apiUrl } from "../lib/api";
 import { invitationUrl } from "../lib/invite";
 import type { MeetingSummary } from "../lib/types";
@@ -76,6 +79,16 @@ export default function MeetingRoom({ meeting, participantId, name, localMedia, 
   const [showReactions, setShowReactions] = useState(false);
   const [showHostTools, setShowHostTools] = useState(false);
   const [showMore, setShowMore] = useState(false);
+  // ── Video layout (Phase 11) ── every one of these is a LOCAL viewer
+  // preference: never broadcast over the WebSocket, never persisted, never
+  // sent to the backend. A refresh returns to Gallery; every browser's
+  // view is its own.
+  const [layout, setLayout] = useState<MeetingLayout>("gallery");
+  const [gallerySort, setGallerySort] = useState<GallerySort>("join");
+  const [pinnedParticipantId, setPinnedParticipantId] = useState<string | null>(null);
+  const [hideSelfView, setHideSelfView] = useState(false);
+  const [hideNonVideoParticipants, setHideNonVideoParticipants] = useState(false);
+  const [showViewMenu, setShowViewMenu] = useState(false);
   const [reactionToasts, setReactionToasts] = useState<ToastReaction[]>([]);
   const [aiSummary, setAiSummary] = useState<{ mode: string; summary: string; key_points: string[]; action_items: string[]; questions: string[] } | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
@@ -243,6 +256,79 @@ export default function MeetingRoom({ meeting, participantId, name, localMedia, 
   signalHandlerRef.current = handleSignal;
   stopScreenShareRef.current = stopScreenShare;
 
+  // ── Derived layout state (Phase 11) ── everything below is a pure
+  // derivation of roster + local media + viewer preferences. Participants
+  // and remoteStreams are NEVER mutated for view preferences — hiding is a
+  // render-time filter, so the WebRTC layer and everyone else's view are
+  // untouched.
+
+  // Tiles: the roster with our own live media state overlaid (our own
+  // events are broadcast to others, never echoed back to us), ordered by
+  // the viewer's gallery sort.
+  const tileParticipants = useMemo<TileParticipant[]>(() => {
+    const tiles = participants.map((participant) => participant.participant_id === participantId
+      ? { ...participant, audio_enabled: isAudioEnabled, video_enabled: isVideoEnabled, is_screen_sharing: isScreenSharing, is_self: true }
+      : { ...participant, is_self: false });
+    return gallerySort === "name" ? [...tiles].sort((a, b) => a.name.localeCompare(b.name)) : tiles;
+  }, [participants, participantId, isAudioEnabled, isVideoEnabled, isScreenSharing, gallerySort]);
+
+  // Who is presenting: us (isScreenSharing is useWebRTC's live source of
+  // truth) or the remote sharer. One sharer at a time is enforced by the
+  // server; when the sharer leaves, participant_left clears remoteSharerId
+  // and the room falls back to the selected camera layout.
+  const presentationSharer = isScreenSharing
+    ? tileParticipants.find((tile) => tile.is_self) ?? null
+    : tileParticipants.find((tile) => tile.participant_id === remoteSharerId) ?? null;
+  const presentationActive = presentationSharer !== null;
+
+  // Hide preferences: render-time filters only. Hide Self View never stops
+  // the camera — the local track and its publishing state are untouched.
+  // The active sharer is exempt from "hide non-video": while sharing, their
+  // stream IS the presentation even if their camera is off.
+  const visibleTiles = tileParticipants.filter((tile) => {
+    if (tile.is_self && hideSelfView && !tile.is_screen_sharing) return false;
+    if (hideNonVideoParticipants && !tile.video_enabled && !tile.is_screen_sharing && tile.participant_id !== presentationSharer?.participant_id) return false;
+    return true;
+  });
+
+  // Speaker/Multi-speaker primary: the pinned participant wins, then the
+  // first remote, then ourselves — deterministic, no VAD. Presentation
+  // overrides this entirely (the sharer is the primary).
+  const primaryTile = presentationActive
+    ? null
+    : visibleTiles.find((tile) => tile.participant_id === pinnedParticipantId)
+      ?? visibleTiles.find((tile) => !tile.is_self)
+      ?? visibleTiles[0]
+      ?? null;
+  const secondaryTiles = primaryTile
+    ? visibleTiles.filter((tile) => tile.participant_id !== primaryTile.participant_id)
+    : visibleTiles;
+  // Presentation strip: every visible participant INCLUDING the sharer —
+  // their own entry renders as an avatar (their stream already renders once
+  // as the primary), which also keeps them listed under "hide non-video".
+  const presentationStrip = presentationSharer ? visibleTiles : [];
+
+  // Pinning is a LOCAL viewer preference — no WebSocket message, no backend
+  // involvement; every browser's pin is its own.
+  const togglePin = (targetId: string) => setPinnedParticipantId((current) => (current === targetId ? null : targetId));
+  // A pin on a departed participant is stale: clear it so the primary falls
+  // back to the deterministic default instead of rendering a blank stage.
+  useEffect(() => {
+    if (pinnedParticipantId && !participants.some((item) => item.participant_id === pinnedParticipantId)) setPinnedParticipantId(null);
+  }, [participants, pinnedParticipantId]);
+
+  // One context object feeds every tile; each tile takes exactly one video
+  // slot from it, so every participant's stream renders in at most one
+  // <video> element.
+  const tileCtx: TileContext = {
+    localStream: stream,
+    localStreamRef,
+    localScreenStream: screenStream,
+    remoteStreams,
+    pinnedParticipantId,
+    onTogglePin: togglePin,
+  };
+
   const sendEvent = (payload: Record<string, unknown>) => {
     sendMessage(payload);
   };
@@ -376,7 +462,7 @@ export default function MeetingRoom({ meeting, participantId, name, localMedia, 
     }
   };
   const toggleFullscreen = async () => {
-    setShowMore(false);
+    setShowMore(false); setShowViewMenu(false);
     try {
       if (document.fullscreenElement) await document.exitFullscreen();
       else await document.documentElement.requestFullscreen();
@@ -418,7 +504,7 @@ export default function MeetingRoom({ meeting, participantId, name, localMedia, 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setOpenPanel(null); setShowReactions(false); setShowHostTools(false); setShowMore(false); setShowShortcuts(false); setConfirmExit(null);
+        setOpenPanel(null); setShowReactions(false); setShowHostTools(false); setShowMore(false); setShowViewMenu(false); setShowShortcuts(false); setConfirmExit(null);
         return;
       }
       if (confirmExit || showShortcuts) return;
@@ -441,47 +527,79 @@ export default function MeetingRoom({ meeting, participantId, name, localMedia, 
   // Floating menus close when clicking anywhere outside them (their own
   // toggle buttons are excluded so a second click still toggles).
   useEffect(() => {
-    if (!showReactions && !showHostTools && !showMore) return;
+    if (!showReactions && !showHostTools && !showMore && !showViewMenu) return;
     const onPointerDown = (event: MouseEvent) => {
       const target = event.target as HTMLElement | null;
       if (target?.closest("[data-floating-menu]") || target?.closest("[data-menu-toggle]")) return;
-      setShowReactions(false); setShowHostTools(false); setShowMore(false);
+      setShowReactions(false); setShowHostTools(false); setShowMore(false); setShowViewMenu(false);
     };
     document.addEventListener("mousedown", onPointerDown);
     return () => document.removeEventListener("mousedown", onPointerDown);
-  }, [showReactions, showHostTools, showMore]);
+  }, [showReactions, showHostTools, showMore, showViewMenu]);
 
   return (
     <div className="meeting-room flex flex-col bg-[#0d1117] text-white w-full relative" style={{ height: "100dvh" }}>
       <header className="flex items-center justify-between px-4 md:px-6 py-3 bg-[#151a22] border-b border-white/10 z-20">
         <div className="flex items-center gap-3"><div className="w-8 h-8 rounded-lg bg-[#2f6fed] flex items-center justify-center font-semibold text-sm">M</div><div className="min-w-0"><div className="font-semibold text-sm truncate">{meeting.title || `${name}'s meeting`}</div><div className="text-[11px] text-slate-400">ID: {meeting_id}</div></div><button onClick={() => copyText(inviteLink, "Meeting link copied")} className="w-8 h-8 rounded-lg text-slate-300 hover:bg-white/10 flex items-center justify-center" aria-label="Copy invite link"><Copy className="w-4 h-4" /></button></div>
-        <div className="flex items-center gap-2 text-xs text-slate-300">{(isScreenSharing || remoteSharerId) && <span className="flex items-center gap-1.5 rounded-full border border-emerald-400/30 bg-emerald-500/15 px-2.5 py-1 text-emerald-300"><Monitor className="w-3.5 h-3.5" />{isScreenSharing ? "You are sharing" : `${participants.find((item) => item.participant_id === remoteSharerId)?.name ?? "Someone"} is sharing`}</span>}<span className={`w-2 h-2 rounded-full ${status === "connected" ? "bg-emerald-400" : status === "reconnecting" || status === "connecting" ? "bg-amber-400" : "bg-red-400"}`} /> {status === "connected" ? "Connected" : status === "reconnecting" ? "Reconnecting" : status === "connecting" ? "Connecting" : "Disconnected"}{remoteParticipants.length > 0 && <span className="ml-2 text-slate-500" title={Object.entries(peerStatuses).map(([id, peerStatus]) => `${id.slice(0, 8)}: ${peerStatus}`).join("\n") || "No peer connections yet"}>· P2P {remoteParticipants.length}</span>}</div>
+        <div className="flex items-center gap-2 text-xs text-slate-300 min-w-0 justify-end">{(isScreenSharing || remoteSharerId) && <span className="min-w-0 max-w-[46vw] sm:max-w-none flex items-center gap-1.5 rounded-full border border-emerald-400/30 bg-emerald-500/15 px-2.5 py-1 text-emerald-300"><Monitor className="w-3.5 h-3.5 shrink-0" /><span className="truncate">{isScreenSharing ? "You are sharing" : `${participants.find((item) => item.participant_id === remoteSharerId)?.name ?? "Someone"} is sharing`}</span></span>}<span className={`w-2 h-2 rounded-full ${status === "connected" ? "bg-emerald-400" : status === "reconnecting" || status === "connecting" ? "bg-amber-400" : "bg-red-400"}`} /> {status === "connected" ? "Connected" : status === "reconnecting" ? "Reconnecting" : status === "connecting" ? "Connecting" : "Disconnected"}{remoteParticipants.length > 0 && <span className="ml-2 text-slate-500" title={Object.entries(peerStatuses).map(([id, peerStatus]) => `${id.slice(0, 8)}: ${peerStatus}`).join("\n") || "No peer connections yet"}>· P2P {remoteParticipants.length}</span>}</div>
       </header>
 
-      <main className="flex-1 relative overflow-y-auto p-4 pb-28 flex flex-wrap content-center justify-center gap-4">
+      <main className="flex-1 relative overflow-y-auto p-3 md:p-4 pb-24 md:pb-28">
         {!isWebRTCAvailable && <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 max-w-[calc(100%-2rem)] rounded-xl border border-red-300/20 bg-red-400/10 px-4 py-2 text-center text-xs text-red-100">Your browser does not support WebRTC. You can use chat, but live audio and video are unavailable.</div>}
         {shareNotice && <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10 max-w-[calc(100%-2rem)] rounded-xl border border-amber-300/20 bg-amber-400/10 px-4 py-2 text-center text-xs text-amber-100">{shareNotice}<button onClick={() => setShareNotice(null)} className="ml-3 font-semibold underline underline-offset-2">Dismiss</button></div>}
         {actionNotice && <div role="status" className="absolute top-14 left-1/2 -translate-x-1/2 z-10 max-w-[calc(100%-2rem)] rounded-xl border border-amber-300/20 bg-amber-400/10 px-4 py-2 text-center text-xs text-amber-100">{actionNotice}</div>}
         {mediaError && <div className="absolute top-14 left-1/2 -translate-x-1/2 z-10 max-w-[calc(100%-2rem)] rounded-xl border border-amber-300/20 bg-amber-400/10 px-4 py-2 text-center text-xs text-amber-100">{mediaError.message}<button onClick={() => startMedia()} className="ml-3 font-semibold underline underline-offset-2">Try again</button></div>}
-        <div className="relative w-full max-w-xl aspect-video bg-[#171d27] rounded-xl overflow-hidden shadow-2xl border border-white/10"><div className="absolute top-3 left-3 z-10 text-xs bg-black/50 rounded-md px-2 py-1">{isScreenSharing ? "You are sharing your screen" : "You"}</div><LocalVideoTile stream={stream} streamRef={localStreamRef} displayStream={isScreenSharing ? screenStream : null} name={name} videoEnabled={isVideoEnabled} isSharing={isScreenSharing} />{isScreenSharing && <div className="absolute bottom-3 right-3 text-xs bg-emerald-500/90 rounded-md px-2 py-1">Screen sharing</div>}<TileLabel name={name} muted={isMuted} /> </div>
-        {remoteParticipants.map((participant) => <div key={participant.participant_id} className="relative w-full max-w-sm aspect-video bg-[#171d27] rounded-xl overflow-hidden shadow-xl border border-white/10"><div className="absolute top-3 left-3 z-10 text-xs bg-black/50 rounded-md px-2 py-1">{participant.is_screen_sharing ? `${participant.name} is sharing` : "Remote video"}</div><RemoteVideoTile stream={remoteStreams[participant.participant_id]} name={participant.name} videoEnabled={participant.video_enabled} isScreenSharing={participant.is_screen_sharing} /><TileLabel name={participant.name} muted={!participant.audio_enabled} host={participant.role === "host"} /></div>)}
+        {/* Presentation takes priority over every camera layout while anyone
+            is sharing; the viewer's selected layout resumes the moment the
+            share stops. Layout switching is pure render state — it never
+            touches offers, ICE, sockets, or media tracks. */}
+        {presentationSharer
+          ? <PresentationLayout sharer={presentationSharer} strip={presentationStrip} ctx={tileCtx} />
+          : layout === "speaker"
+            ? <SpeakerLayout primary={primaryTile} secondary={secondaryTiles} ctx={tileCtx} />
+            : layout === "multi-speaker"
+              ? <MultiSpeakerLayout primary={primaryTile} secondary={secondaryTiles} ctx={tileCtx} />
+              : <GalleryLayout tiles={visibleTiles} ctx={tileCtx} />}
+        {visibleTiles.length === 0 && <div className="absolute inset-0 flex items-center justify-center text-sm text-slate-500 pointer-events-none">Everyone is hidden by your view settings.</div>}
         <div className="fixed top-20 right-5 z-30 flex flex-col items-end gap-2 pointer-events-none">{reactionToasts.map((item) => <div key={item.id} data-reaction-toast className="reaction-toast rounded-full bg-white text-slate-900 pl-3 pr-4 py-2 shadow-2xl text-sm font-medium">{item.reaction} <span className="text-slate-500 font-normal">{item.name}</span></div>)}</div>
       </main>
 
-      <div className="absolute bottom-0 left-0 right-0 z-[60] bg-[#151a22]/95 border-t border-white/10 backdrop-blur-md px-2 py-3"><div className="flex items-end justify-center gap-1 sm:gap-3 overflow-x-auto">
+      {/* When a side panel is docked it overlays the right 370px, so the centered
+          control row is inset to match — otherwise late buttons (More/End) would
+          sit underneath the panel and become unclickable. On phones the panel
+          covers the full width, so no inset is possible or needed. */}
+      <div className={`absolute bottom-0 left-0 right-0 z-[60] bg-[#151a22]/95 border-t border-white/10 backdrop-blur-md px-2 py-3 ${openPanel ? "sm:pr-[370px]" : ""}`}><div className="flex items-end justify-center gap-1 sm:gap-3 overflow-x-auto">
         <ControlButton icon={isMuted ? <MicOff /> : <Mic />} label={isMuted ? "Unmute" : "Mute"} active={isMuted} onClick={toggleLocalAudio} />
         <ControlButton icon={isVideoOff ? <VideoOff /> : <Video />} label={isVideoOff ? "Start video" : "Stop video"} active={isVideoOff} onClick={toggleLocalVideo} />
         <ControlButton icon={<Users />} label="Participants" badge={participants.length} active={openPanel === "participants"} onClick={() => { setOpenPanel(openPanel === "participants" ? null : "participants"); setShowHostTools(false); }} />
         <ControlButton icon={<MessageSquare />} label="Chat" badge={chatUnread} active={openPanel === "chat"} onClick={() => { isChatOpen ? closeChat() : openChat(); }} />
-        <ControlButton icon={<SmilePlus />} label="React" active={showReactions} menuToggle onClick={() => setShowReactions(!showReactions)} />
+        <ControlButton icon={<LayoutGrid />} label="View" active={showViewMenu} menuToggle onClick={() => { setShowViewMenu(!showViewMenu); setShowReactions(false); setShowHostTools(false); setShowMore(false); }} />
+        <ControlButton icon={<SmilePlus />} label="React" active={showReactions} menuToggle onClick={() => { setShowReactions(!showReactions); setShowViewMenu(false); }} />
         <ControlButton icon={<Share2 />} label={isScreenSharing ? "Stop share" : "Share"} active={isScreenSharing} onClick={toggleShare} />
-        {isHost && <ControlButton icon={<Crown />} label="Host tools" active={showHostTools} menuToggle onClick={() => { setShowHostTools(!showHostTools); setOpenPanel(null); }} />}
+        {isHost && <ControlButton icon={<Crown />} label="Host tools" active={showHostTools} menuToggle onClick={() => { setShowHostTools(!showHostTools); setOpenPanel(null); setShowViewMenu(false); }} />}
         <ControlButton icon={<Sparkles />} label="Zoom AI" active={openPanel === "ai"} onClick={() => { setOpenPanel(openPanel === "ai" ? null : "ai"); setShowHostTools(false); }} />
-        <ControlButton icon={<MoreHorizontal />} label="More" active={showMore} menuToggle onClick={() => setShowMore(!showMore)} />
+        <ControlButton icon={<MoreHorizontal />} label="More" active={showMore} menuToggle onClick={() => { setShowMore(!showMore); setShowViewMenu(false); }} />
         <ControlButton icon={<PhoneOff />} label="End" danger onClick={() => (isHost ? setConfirmExit(hostEndConfirm) : leaveMeeting())} />
       </div></div>
 
       {showReactions && <FloatingMenu className="bottom-24 left-1/2 -translate-x-1/2 max-w-[calc(100vw-2rem)]"><div className="flex flex-wrap justify-center gap-2">{reactions.map((reaction) => <button key={reaction} onClick={() => sendReaction(reaction)} className="text-2xl hover:scale-125 transition-transform p-1" aria-label={`Send ${reaction}`}>{reaction}</button>)}</div></FloatingMenu>}
+      {showViewMenu && <FloatingMenu className="bottom-24 left-1/2 -translate-x-1/2 w-72 max-w-[calc(100vw-2rem)] max-h-[70vh] overflow-y-auto"><div className="text-[11px] uppercase tracking-wider text-slate-500 px-3 pb-2">View</div><div className="space-y-0.5">
+        <ViewMenuRadio icon={<Speaker />} label="Speaker View" checked={layout === "speaker"} onClick={() => { setLayout("speaker"); setShowViewMenu(false); }} />
+        <ViewMenuRadio icon={<LayoutGrid />} label="Gallery View" checked={layout === "gallery"} onClick={() => { setLayout("gallery"); setShowViewMenu(false); }} />
+        <ViewMenuRadio icon={<Columns2 />} label="Multi-Speaker View" checked={layout === "multi-speaker"} onClick={() => { setLayout("multi-speaker"); setShowViewMenu(false); }} />
+        {presentationActive && <div className="px-3 py-1.5 text-[11px] text-amber-300/90">Screen share is presenting — your selected view resumes when it stops.</div>}
+        <MenuDivider />
+        <div className="px-3 pt-1 pb-1 text-[11px] text-slate-500">Sort gallery by</div>
+        <ViewMenuRadio icon={<ArrowDownUp />} label="Join order" checked={gallerySort === "join"} onClick={() => setGallerySort("join")} />
+        <ViewMenuRadio icon={<ArrowDownUp />} label="Name (A-Z)" checked={gallerySort === "name"} onClick={() => setGallerySort("name")} />
+        <MenuDivider />
+        {/* Shown but disabled — the ordering feature does not exist yet and a fake toggle would lie. */}
+        <MenuButton icon={<Users />} label="Follow host's video order" onClick={() => {}} disabled hint="Coming soon" />
+        <MenuDivider />
+        <ViewMenuToggle icon={<EyeOff />} label="Hide self view" checked={hideSelfView} onClick={() => setHideSelfView(!hideSelfView)} />
+        <ViewMenuToggle icon={<VideoOff />} label="Hide non-video participants" checked={hideNonVideoParticipants} onClick={() => setHideNonVideoParticipants(!hideNonVideoParticipants)} />
+        {fullscreenSupported && <><MenuDivider /><MenuButton icon={<Expand />} label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"} onClick={toggleFullscreen} /></>}
+      </div></FloatingMenu>}
       {showHostTools && <FloatingMenu className="bottom-24 left-1/2 -translate-x-1/2 w-72"><div className="flex items-center justify-between mb-3"><strong className="text-sm">Host tools</strong></div><div className="space-y-1"><MenuButton icon={<MicOff />} label="Mute all" onClick={muteAll} /><MenuButton icon={<Users />} label="Manage participants" onClick={() => { setOpenPanel("participants"); setShowHostTools(false); }} /><MenuButton icon={<PhoneOff />} label="End meeting" onClick={() => { setShowHostTools(false); setConfirmExit(hostEndConfirm); }} /></div></FloatingMenu>}
       {showMore && <FloatingMenu className="bottom-24 right-4 w-56"><MenuButton icon={<Info />} label="Meeting info" onClick={() => { setOpenPanel("info"); setShowMore(false); }} />{fullscreenSupported && <MenuButton icon={<Expand />} label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"} onClick={toggleFullscreen} />}<MenuButton icon={<Keyboard />} label="Keyboard shortcuts" onClick={() => { setShowShortcuts(true); setShowMore(false); }} /></FloatingMenu>}
       {openPanel === "participants" && <SidePanel title={`Participants (${participants.length})`} onClose={() => setOpenPanel(null)}><div className="space-y-1">{participants.map((participant) => {
@@ -504,9 +622,9 @@ export default function MeetingRoom({ meeting, participantId, name, localMedia, 
 
 function ControlButton({ icon, label, onClick, active, danger, badge, menuToggle }: { icon: React.ReactNode; label: string; onClick: () => void; active?: boolean; danger?: boolean; badge?: number; menuToggle?: boolean }) { return <button onClick={onClick} data-menu-toggle={menuToggle ? "true" : undefined} className="relative flex flex-col items-center gap-1 min-w-[64px] px-2 py-1 text-[10px] text-slate-300 hover:text-white rounded-xl transition-colors" aria-label={label}><span className={`w-10 h-10 rounded-xl flex items-center justify-center ${danger ? "bg-[#e5484d] text-white" : active ? "bg-white text-slate-900" : "bg-white/10 text-white"}`}>{icon}</span><span className="whitespace-nowrap">{label}</span>{badge ? <span className="absolute top-0 right-1 min-w-4 h-4 rounded-full bg-[#2f6fed] text-[9px] flex items-center justify-center px-1">{badge}</span> : null}</button>; }
 function FloatingMenu({ className, children }: { className: string; children: React.ReactNode }) { return <div data-floating-menu className={`fixed z-[80] rounded-2xl bg-[#20252d] border border-white/10 shadow-2xl p-4 ${className}`}>{children}</div>; }
-function MenuButton({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) { return <button onClick={onClick} className="w-full flex items-center gap-3 text-sm text-slate-200 hover:bg-white/10 rounded-lg px-3 py-2 text-left"><span className="text-slate-400">{icon}</span>{label}</button>; }
+function MenuButton({ icon, label, onClick, disabled, hint }: { icon: React.ReactNode; label: string; onClick: () => void; disabled?: boolean; hint?: string }) { return <button onClick={disabled ? undefined : onClick} disabled={disabled} className="w-full flex items-center gap-3 text-sm text-slate-200 hover:bg-white/10 rounded-lg px-3 py-2 text-left disabled:opacity-40 disabled:hover:bg-transparent"><span className="text-slate-400">{icon}</span><span className="flex-1 truncate">{label}</span>{hint && <span className="text-[10px] text-slate-500">{hint}</span>}</button>; }
+function MenuDivider() { return <div className="my-1.5 border-t border-white/10" />; }
 function SidePanel({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) { return <aside className="fixed top-0 right-0 bottom-0 z-[70] w-full sm:w-[370px] bg-[#20252d] border-l border-white/10 shadow-2xl p-5 pt-6"><div className="flex items-center justify-between mb-5"><h2 className="font-semibold">{title}</h2><button onClick={onClose} className="w-8 h-8 rounded-lg hover:bg-white/10 flex items-center justify-center" aria-label="Close panel"><X className="w-5 h-5" /></button></div><div className="h-[calc(100%-52px)]">{children}</div></aside>; }
 function Avatar({ name, large }: { name: string; large?: boolean }) { return <div className={`${large ? "w-full h-full text-6xl" : "w-9 h-9 text-xs"} rounded-xl bg-[#b96e3d] flex items-center justify-center font-semibold text-white`}>{name.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase()}</div>; }
-function TileLabel({ name, muted, host }: { name: string; muted: boolean; host?: boolean }) { return <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/60 rounded-md text-xs font-medium flex items-center gap-1">{name}{host && <Crown className="w-3 h-3 text-amber-300" />}{muted && <MicOff className="w-3 h-3 text-red-400" />}</div>; }
 function Section({ title, items }: { title: string; items: string[] }) { return <div><h3 className="font-semibold text-xs uppercase tracking-wider text-slate-500 mb-2">{title}</h3><ul className="space-y-1 text-slate-300">{items.map((item) => <li key={item}>- {item}</li>)}</ul></div>; }
 function InfoRow({ label, value, copy }: { label: string; value: string; copy?: () => void }) { return <div><div className="text-xs text-slate-500 mb-1">{label}</div><div className="flex items-center gap-2"><span className="truncate text-slate-200">{value}</span>{copy && <button onClick={copy} className="shrink-0 text-slate-400 hover:text-white" aria-label={`Copy ${label}`}><Clipboard className="w-4 h-4" /></button>}</div></div>; }
